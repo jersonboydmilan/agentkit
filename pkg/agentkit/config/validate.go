@@ -204,6 +204,11 @@ func (c *AgentConfig) Validate() error {
 		}
 
 		validateToolTransport(at(toolPath), i, t)
+		for j, part := range t.Command {
+			if part == "" {
+				addAt(fmt.Sprintf("%s.command[%d]", toolPath, j), "tools[%d] (%s): command[%d] must be non-empty", i, t.Name, j)
+			}
+		}
 		validateToolEnv(at(toolPath+".env"), i, t)
 		validateToolHeaders(at(toolPath+".headers"), i, t)
 		validateAuth(at(toolPath+".auth"), fmt.Sprintf("tools[%d] (%s).auth", i, t.Name), t.Auth)
@@ -1447,11 +1452,6 @@ func validateToolTransport(add func(string, ...any), i int, t Tool) {
 }
 
 func validateToolEnv(add func(string, ...any), i int, t Tool) {
-	for j, part := range t.Command {
-		if part == "" {
-			add("tools[%d] (%s): command[%d] must be non-empty", i, t.Name, j)
-		}
-	}
 	for _, e := range t.Env {
 		if e == "" {
 			add("tools[%d] (%s): env entry is empty; list env var NAMES only", i, t.Name)
