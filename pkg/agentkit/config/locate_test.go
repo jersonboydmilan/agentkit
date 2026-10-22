@@ -121,7 +121,7 @@ func TestParseYAMLPath(t *testing.T) {
 	if segs[1].index != 1 || !segs[1].isIndex || segs[4].key != "x.y" {
 		t.Fatalf("unexpected segments %+v", segs)
 	}
-	for _, bad := range []string{"tools", "$..a", "$.a[x]", "$.a[-1]", "$.'open"} {
+	for _, bad := range []string{"tools", "$..a", "$.a[x]", "$.a[-1]", "$.'open", `$."open\"`, `$."bad\q"`} {
 		if _, ok := parseYAMLPath(bad); ok {
 			t.Fatalf("parseYAMLPath(%q) accepted a malformed path", bad)
 		}
@@ -129,11 +129,173 @@ func TestParseYAMLPath(t *testing.T) {
 }
 
 func TestYAMLPathKeyRoundTrips(t *testing.T) {
-	for _, key := range []string{"team", "example.com/team", "has space"} {
+	for _, key := range []string{"team", "example.com/team", "has space", "", "ai.orka.owner's", `a."b\c`, "line\nbreak"} {
 		segs, ok := parseYAMLPath(yamlPathKey("$.metadata.labels", key))
 		if !ok || len(segs) != 3 || segs[2].key != key {
 			t.Fatalf("key %q did not round-trip: ok=%v segs=%+v", key, ok, segs)
 		}
+	}
+}
+
+func TestLocateProblemsPreservesLabelKeys(t *testing.T) {
+	src := `apiVersion: v1alpha1
+kind: Agent
+metadata:
+  name: hello
+  labels:
+    ai.orka.owners: other
+    ai.orka.owner's: original
+`
+	cfg, err := NewFromBytes([]byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, lp := range LocateProblems(cfg.Validate(), []byte(src)) {
+		if strings.HasPrefix(lp.Message, `metadata.labels["ai.orka.owner's"]`) {
+			if lp.StartLine != 7 {
+				t.Fatalf("apostrophe label: line %d (path %q), want 7", lp.StartLine, lp.Path)
+			}
+			return
+		}
+	}
+	t.Fatal("no problem reported for reserved label containing an apostrophe")
+}
+
+func TestLocateProblemsHelperFields(t *testing.T) {
+	type location struct {
+		path string
+		line int
+	}
+	cases := []struct {
+		name string
+		src  string
+		want map[string]location
+	}{
+		{
+			name: "tool fields and items",
+			src: `tools:
+  - name: search
+    command: [search-mcp]
+  - name: fetch
+    type: grpc
+    transport: grpc
+    urlEnv: https://example.com/mcp
+    env:
+      - API_KEY
+      - bad-key
+    headers:
+      - name: X-Key
+        valueEnv: API_KEY
+      - name: bad header
+        value: sk-example
+        valueEnv: bad-key
+    auth:
+      type: bearer
+      tokenEnv: bad-key
+      audience: invalid
+`,
+			want: map[string]location{
+				"tools[1] (fetch): remote MCP tools must set type":      {"$.tools[1].type", 5},
+				"tools[1] (fetch): remote MCP tools must set transport": {"$.tools[1].transport", 6},
+				"tools[1] (fetch): urlEnv":                              {"$.tools[1].urlEnv", 7},
+				"tools[1] (fetch): remote MCP tools must use headers":   {"$.tools[1].env", 8},
+				"tools[1] (fetch): env entry":                           {"$.tools[1].env[1]", 10},
+				"tools[1] (fetch).headers[1].name":                      {"$.tools[1].headers[1].name", 14},
+				"tools[1] (fetch).headers[1] must set exactly one":      {"$.tools[1].headers[1]", 14},
+				"tools[1] (fetch).headers[1].value looks":               {"$.tools[1].headers[1].value", 15},
+				"tools[1] (fetch).headers[1].valueEnv":                  {"$.tools[1].headers[1].valueEnv", 16},
+				"tools[1] (fetch).auth.tokenEnv":                        {"$.tools[1].auth.tokenEnv", 19},
+				"tools[1] (fetch).auth.audience":                        {"$.tools[1].auth.audience", 20},
+			},
+		},
+		{
+			name: "model auth fields",
+			src: `model:
+  auth:
+    type: workload-identity-token
+    tokenEnv: API_KEY
+    audience: ""
+`,
+			want: map[string]location{
+				"model.auth.tokenEnv": {"$.model.auth.tokenEnv", 4},
+				"model.auth.audience": {"$.model.auth.audience", 5},
+			},
+		},
+		{
+			name: "context auth fields",
+			src: `context:
+  providers:
+    - name: docs
+      type: search
+      auth:
+        type: bearer
+        tokenEnv: bad-key
+`,
+			want: map[string]location{
+				"context.providers[0].auth.type":     {"$.context.providers[0].auth.type", 6},
+				"context.providers[0].auth.tokenEnv": {"$.context.providers[0].auth.tokenEnv", 7},
+			},
+		},
+		{
+			name: "brokered tool fields",
+			src: `brokeredTools:
+  - name: first
+    description: Search documents
+    brokeredClass: read
+    parameters: {type: object}
+  - name: bad!
+    description: https://example.com
+    brokeredClass: unknown
+    parameters: null
+    schemaDigest: invalid
+`,
+			want: map[string]location{
+				"brokeredTools[1].name":          {"$.brokeredTools[1].name", 6},
+				"brokeredTools[1].description":   {"$.brokeredTools[1].description", 7},
+				"brokeredTools[1].brokeredClass": {"$.brokeredTools[1].brokeredClass", 8},
+				"brokeredTools[1].parameters":    {"$.brokeredTools[1].parameters", 9},
+				"brokeredTools[1].schemaDigest":  {"$.brokeredTools[1].schemaDigest", 10},
+			},
+		},
+		{
+			name: "observability fields",
+			src: `observability:
+  otel:
+    endpointEnv: bad-key
+  logs:
+    levelEnv: bad-key
+`,
+			want: map[string]location{
+				"observability.otel.endpointEnv": {"$.observability.otel.endpointEnv", 3},
+				"observability.logs.levelEnv":    {"$.observability.logs.levelEnv", 5},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := "apiVersion: v1alpha1\nkind: Agent\n" + tc.src
+			cfg, err := NewFromBytes([]byte(src))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			verr := cfg.Validate()
+			found := map[string]bool{}
+			for _, lp := range LocateProblems(verr, []byte(src)) {
+				for prefix, want := range tc.want {
+					if strings.HasPrefix(lp.Message, prefix) {
+						found[prefix] = true
+						if lp.Path != want.path || lp.StartLine != want.line+2 {
+							t.Errorf("%q: path %q line %d, want path %q line %d", lp.Message, lp.Path, lp.StartLine, want.path, want.line+2)
+						}
+					}
+				}
+			}
+			for prefix := range tc.want {
+				if !found[prefix] {
+					t.Errorf("no problem starting with %q in:\n%v", prefix, verr)
+				}
+			}
+		})
 	}
 }
 

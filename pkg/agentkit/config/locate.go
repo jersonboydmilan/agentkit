@@ -101,12 +101,26 @@ func parseYAMLPath(path string) ([]pathSegment, bool) {
 			rest = rest[1:]
 			if rest != "" && (rest[0] == '\'' || rest[0] == '"') {
 				quote := rest[0]
-				end := strings.IndexByte(rest[1:], quote)
-				if end < 0 {
+				end := 1
+				for end < len(rest) && rest[end] != quote {
+					if quote == '"' && rest[end] == '\\' {
+						end++
+					}
+					end++
+				}
+				if end >= len(rest) {
 					return nil, false
 				}
-				segs = append(segs, pathSegment{key: rest[1 : end+1]})
-				rest = rest[end+2:]
+				key := rest[1:end]
+				if quote == '"' {
+					var err error
+					key, err = strconv.Unquote(rest[:end+1])
+					if err != nil {
+						return nil, false
+					}
+				}
+				segs = append(segs, pathSegment{key: key})
+				rest = rest[end+1:]
 				continue
 			}
 			end := strings.IndexAny(rest, ".[")
@@ -142,7 +156,7 @@ func yamlPathKey(base, key string) string {
 	if key != "" && !strings.ContainsAny(key, ".[]'\" ") {
 		return base + "." + key
 	}
-	return base + ".'" + strings.ReplaceAll(key, "'", "") + "'"
+	return base + "." + strconv.Quote(key)
 }
 
 // locatePath walks file along path and returns the span of the deepest node
