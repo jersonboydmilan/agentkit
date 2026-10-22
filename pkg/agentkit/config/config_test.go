@@ -246,8 +246,8 @@ expose:
 	if len(located) != 1 {
 		t.Fatalf("expected one command problem, got: %+v", located)
 	}
-	if lp := located[0]; lp.Path != "$.tools[0].command[0]" || lp.StartLine != 14 || lp.EndLine != 14 {
-		t.Fatalf("command problem = %+v, want $.tools[0].command[0] on line 14", lp)
+	if lp := located[0]; lp.Path != "$.tools[0].command[0]" || lp.StartLine != 13 || lp.EndLine != 13 {
+		t.Fatalf("command problem = %+v, want $.tools[0].command[0] on line 13", lp)
 	}
 }
 
